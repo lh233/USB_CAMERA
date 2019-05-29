@@ -1,0 +1,201 @@
+1. platform:
+1.1 s3c24xx-i2s.c : 把s3c24xx_i2s_dai放入链表dai_list, .name = "s3c24xx-iis",
+s3c24xx_iis_dev_probe
+  snd_soc_register_dai(&pdev->dev, &s3c24xx_i2s_dai);
+    list_add(&dai->list, &dai_list);  
+
+1.2 sound/soc/samsung/dma.c : 把samsung_asoc_platform放入了链表platform_list, .name = "samsung-audio",
+samsung_asoc_platform_probe
+  snd_soc_register_platform(&pdev->dev, &samsung_asoc_platform);
+    list_add(&platform->list, &platform_list);
+
+2. codec: uda134x.c
+uda134x_codec_probe
+  snd_soc_register_codec(&pdev->dev,&soc_codec_dev_uda134x, &uda134x_dai, 1);
+      struct snd_soc_codec *codec;
+      codec->driver = codec_drv; = &soc_codec_dev_uda134x
+      
+      snd_soc_register_dais(dev, dai_drv, num_dai); // uda134x_dai
+        list_add(&dai->list, &dai_list); : 把uda134x_dai放入了链表dai_list
+      list_add(&codec->list, &codec_list);
+	  
+	  
+注意：dai_list中既有codec的dai driver、又有cpu dai driver
+
+3. machine:
+s3c24xx_uda134x_probe
+  s3c24xx_uda134x_snd_device = platform_device_alloc("soc-audio", -1);
+  platform_set_drvdata(s3c24xx_uda134x_snd_device, &snd_soc_s3c24xx_uda134x);     
+  platform_device_add(s3c24xx_uda134x_snd_device);
+  
+  .....
+    soc_probe
+      snd_soc_register_card(card);  // card = &snd_soc_s3c24xx_uda134x
+
+      card->rtd = devm_kzalloc(card->dev,...
+      card->rtd[i].dai_link = &card->dai_link[i];  // &s3c24xx_uda134x_dai_link
+      
+      list_add(&card->list, &card_list);
+      
+      snd_soc_instantiate_cards();  // 实例化声卡
+          snd_soc_instantiate_card(card);
+            3.1   /* bind DAIs */
+                  for (i = 0; i < card->num_links; i++)
+                    soc_bind_dai_link(card, i);
+                        3.1.1 /* find CPU DAI */
+                              rtd->cpu_dai = cpu_dai; = //&s3c24xx_i2s_dai
+                        3.1.2 /* find_codec */
+                              rtd->codec = codec;  = // codec, codec->driver=&soc_codec_dev_uda134x
+                        3.1.3 /* find CODEC DAI */      
+                              rtd->codec_dai = codec_dai; // = &uda134x_dai
+                        3.1.4 /* find_platform */
+                              rtd->platform = platform; // = &samsung_asoc_platform
+            3.2 /* initialize the register cache for each available codec */
+                ret = snd_soc_init_codec_cache(codec, compress_type);
+                
+            3.3 snd_card_create
+            
+            3.4 /* early DAI link probe */
+                soc_probe_dai_link    
+                		/* probe the cpu_dai */
+                		/* probe the CODEC */
+                		/* probe the platform */
+                		/* probe the CODEC DAI */
+                		/* create the pcm */
+                					ret = soc_new_pcm(rtd, num);
+                										struct snd_pcm_ops *soc_pcm_ops = &rtd->ops;
+																		soc_pcm_ops->open	= soc_pcm_open;
+																		soc_pcm_ops->close	= soc_pcm_close;
+																		soc_pcm_ops->hw_params	= soc_pcm_hw_params;
+																		soc_pcm_ops->hw_free	= soc_pcm_hw_free;
+																		soc_pcm_ops->prepare	= soc_pcm_prepare;
+																		soc_pcm_ops->trigger	= soc_pcm_trigger;
+																		soc_pcm_ops->pointer	= soc_pcm_pointer;
+                					
+                										snd_pcm_new
+            3.5 snd_card_register
+                              
+                              
+                              
+strace分析： aplay Windows.wav
+1. /dev/snd/controlC0 对应的file_operations是snd_ctl_f_ops
+open : snd_ctl_open
+SNDRV_CTL_IOCTL_PVERSION : snd_ctl_ioctl -> put_user(SNDRV_CTL_VERSION, ip) 
+SNDRV_CTL_IOCTL_CARD_INFO : snd_ctl_ioctl -> snd_ctl_card_info(card, ctl, cmd, argp);
+                                               copy_to_user
+                                               
+SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE : snd_ctl_ioctl -> snd_pcm_control_ioctl -> control->prefer_pcm_subdevice = val;
+close
+上述三个ioctl不涉及硬件操作
+
+2. /dev/snd/pcmC0D0p 对应的file_operations是snd_pcm_f_ops[0]
+open :  snd_pcm_playback_open
+           snd_pcm_open
+              snd_pcm_open_file
+              	struct snd_pcm_substream *substream;
+              	snd_pcm_open_substream
+              		err = snd_pcm_hw_constraints_init(substream);
+              					snd_mask_any
+              					snd_interval_any
+              					......
+              		err = substream->ops->open(substream) // substream->ops : snd_pcm_ops结构体
+              						soc_pcm_open
+              							依次调用cpu_dai, dma, codec_dai, machine的open或startup函数
+              									uda134x_startup 里：snd_pcm_hw_constraint_minmax(SNDRV_PCM_HW_PARAM_RATE),snd_pcm_hw_constraint_minmax(SNDRV_PCM_HW_PARAM_SAMPLE_BITS)
+              									dma_open里: snd_pcm_hw_constraint_integer,snd_soc_set_runtime_hwparams
+              									            runtime->hw.info = hw->info; = SNDRV_PCM_INFO_INTERLEAVED |
+																						    SNDRV_PCM_INFO_BLOCK_TRANSFER |
+																						    SNDRV_PCM_INFO_MMAP |
+																						    SNDRV_PCM_INFO_MMAP_VALID |
+																						    SNDRV_PCM_INFO_PAUSE |
+																						    SNDRV_PCM_INFO_RESUME,
+              		snd_pcm_hw_constraints_complete
+              	pcm_file->substream = substream;
+              	file->private_data = pcm_file;
+
+注意：substream->ops =  soc_new_pcm函数里的soc_pcm_ops
+
+以下的ioctl入口都是：snd_pcm_playback_ioctl              	
+SNDRV_PCM_IOCTL_INFO ： snd_pcm_info_user(substream, arg);
+														substream->ops->ioctl(substream, SNDRV_PCM_IOCTL1_INFO, info);
+														  snd_pcm_lib_ioctl
+														  	
+SNDRV_PCM_IOCTL_PVERSION : put_user(SNDRV_PCM_VERSION, (int __user *)arg)
+SNDRV_PCM_IOCTL_TTSTAMP  : snd_pcm_tstamp(substream, arg);
+                              
+SNDRV_PCM_IOCTL_SYNC_PTR : snd_pcm_sync_ptr(substream, arg); 先不管
+
+SNDRV_PCM_IOCTL_HW_REFINE .... ： snd_pcm_hw_refine_user(substream, arg);
+                                    memdup_user
+                                    snd_pcm_hw_refine(substream, params); 先不管
+                                    copy_to_user
+SNDRV_PCM_IOCTL_HW_PARAMS : snd_pcm_hw_params_user(substream, arg);
+                               snd_pcm_hw_params
+                                  substream->ops->hw_params(substream, params);
+                                     soc_pcm_hw_params
+                                     	依次调用machine,codec_dai,cpu_dai,platform(dma)的hw_params函数
+SNDRV_PCM_IOCTL_SYNC_PTR 
+SNDRV_PCM_IOCTL_SW_PARAMS : snd_pcm_sw_params_user(substream, arg);
+                               snd_pcm_sw_params 不涉及硬件操作
+                                  
+SNDRV_PCM_IOCTL_SYNC_PTR
+SNDRV_PCM_IOCTL_PREPARE  : snd_pcm_prepare(substream, file);
+                               snd_power_wait // 电源管理相关，先不管
+                               .... 调用到platform里的prepare
+                                  
+SNDRV_PCM_IOCTL_SYNC_PTR
+SNDRV_PCM_IOCTL_SW_PARAMS
+
+循环:
+SNDRV_PCM_IOCTL_WRITEI_FRAMES : copy_from_user
+                                snd_pcm_lib_write
+                                		snd_pcm_lib_write1(substream, (unsigned long)buf, size, nonblock, snd_pcm_lib_write_transfer)
+                                				snd_pcm_lib_write_transfer
+                                						copy_from_user
+                                						snd_pcm_start(substream);  // 启动传输
+                                						
+ 
+SNDRV_PCM_IOCTL_SYNC_PTR
+
+SNDRV_PCM_IOCTL_DRAIN
+SNDRV_PCM_IOCTL_DROP
+SNDRV_PCM_IOCTL_HW_FREE
+close
+
+
+
+strace分析： amixer cset numid=1 30 (设置音量)
+/dev/snd/controlC0
+open
+SNDRV_CTL_IOCTL_CARD_INFO
+SNDRV_CTL_IOCTL_PVERSION
+SNDRV_CTL_IOCTL_ELEM_INFO
+SNDRV_CTL_IOCTL_ELEM_READ
+SNDRV_CTL_IOCTL_ELEM_WRITE : snd_ctl_elem_write_user
+														snd_ctl_elem_write
+															// 找到一个snd_kcontrol
+															kctl = snd_ctl_find_id(card, &control->id);
+															// 调用它的put
+															result = kctl->put(kctl, control);
+																		
+
+
+附：
+static struct snd_soc_card snd_soc_s3c24xx_uda134x = {
+  .name = "S3C24XX_UDA134X",
+  .owner = THIS_MODULE,
+  .dai_link = &s3c24xx_uda134x_dai_link,
+  .num_links = 1,
+};
+
+static struct snd_soc_dai_link s3c24xx_uda134x_dai_link = {
+  .name = "UDA134X",
+  .stream_name = "UDA134X",
+  .codec_name = "uda134x-codec",
+  .codec_dai_name = "uda134x-hifi",
+  .cpu_dai_name = "s3c24xx-iis",
+  .ops = &s3c24xx_uda134x_ops,
+  .platform_name  = "samsung-audio",
+};
+
+    

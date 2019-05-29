@@ -1,0 +1,49 @@
+PHONY := __build
+__build:
+
+
+obj-y :=
+subdir-y :=
+
+include Makefile
+
+# obj-y := a.o b.o c/ d/
+# $(filter %/, $(obj-y))   : c/ d/
+# __subdir-y  : c d
+# subdir-y    : c d
+#取出子目录名字
+__subdir-y	:= $(patsubst %/,%,$(filter %/, $(obj-y)))
+subdir-y	+= $(__subdir-y)
+
+# c/built-in.o d/built-in.o
+subdir_objs := $(foreach f,$(subdir-y),$(f)/built-in.o)
+
+# a.o b.o
+#把目录c/ d/去掉，就剩下当前目录的文件
+cur_objs := $(filter-out %/, $(obj-y))
+dep_files := $(foreach f,$(cur_objs),.$(f).d)
+dep_files := $(wildcard $(dep_files))
+
+ifneq ($(dep_files),)
+  include $(dep_files)
+endif
+
+
+PHONY += $(subdir-y)
+
+
+__build : $(subdir-y) built-in.o
+
+$(subdir-y):
+	make -C $@ -f $(TOPDIR)/Makefile.build
+
+#built-in.o 依赖于当前目录的cur_objs和子目录的subdir_objs
+built-in.o : $(cur_objs) $(subdir_objs)
+	$(LD) -r -o $@ $^
+
+dep_file = .$@.d
+
+%.o : %.c
+	$(CC) $(CFLAGS) -Wp,-MD,$(dep_file) -c -o $@ $<
+	
+.PHONY : $(PHONY)
